@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Encoders Viewer</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; background-color: #121212; color: #fff; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; background: #1e1e1e; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h1 { margin-bottom: 20px; color: #e0e0e0; }
+        .data-box { background: #2a2a2a; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #3a3a3a; transition: transform 0.2s; }
+        .data-box:hover { transform: scale(1.02); }
+        .value { font-size: 2.5em; font-weight: bold; color: #00d2ff; margin: 10px 0; }
+        .ky040-value { color: #ff007c; }
+        .lim-sw { color: #ff4500; font-size: 1.5em; font-weight: bold; margin-top: 10px; transition: all 0.2s; }
+        .lim-active { color: #1e1e1e !important; background-color: #ff4500; padding: 5px 10px; border-radius: 5px; }
+        .value-btn { font-size: 1.5em; font-weight: bold; color: #888; padding: 10px; border-radius: 8px; display: inline-block; transition: all 0.2s; }
+        .value-btn.active { color: #1e1e1e; background-color: #00ff88; transform: scale(1.1); box-shadow: 0px 0px 15px #00ff88; }
+        .reset-hint { font-size: 0.9em; color: #ffeb3b; background: rgba(255, 235, 59, 0.1); padding: 5px 10px; border-radius: 5px; margin-top: 10px; display: inline-block; }
+        button { background: #0078d4; color: white; border: none; padding: 12px 24px; font-size: 1.1em; border-radius: 5px; cursor: pointer; transition: 0.3s; font-weight: bold; }
+        button:hover { background: #005a9e; }
+        button:disabled { background: #555; cursor: not-allowed; opacity: 0.7; }
+        #logs { text-align: left; height: 120px; overflow-y: auto; background: #000; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 0.9em; border: 1px solid #333; margin-top: 20px; color: #0f0; }
+        .pin-info { font-size: 0.9em; color: #aaa; margin-top: -5px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Visualizador de Encoders ESP32</h1>
+    <p style="color: #bbb; margin-bottom: 20px;">Use Chrome, Edge ou Opera para acessar portas USB localmente.</p>
+    <button id="connectBtn">Conectar via USB (COM x)</button>
+    
+    <div class="data-box" style="margin-top: 30px;">
+        <h3 style="margin:0;">Encoder Industrial <wbr>(E6B2-CWZ3E)</wbr></h3>
+        <p class="pin-info">Pinos 18 e 19</p>
+        <div class="value" id="val_e6b2">0</div>
+        
+        <div style="border-top: 1px solid #444; margin-top: 15px; padding-top: 15px;">
+            <p class="pin-info">Chave de Fim de Curso (Zera a Posição) - Pino 27</p>
+            <div class="lim-sw" id="val_lim">Esperando fim de curso...</div>
+            <div class="reset-hint">Pressione <b>"R"</b> para ZERAR</div>
+            <br>
+            <button id="resetBtn" style="margin-top: 10px; background-color: #ff9800;">Zerar Agora (R)</button>
+        </div>
+    </div>
+
+    <div class="data-box">
+        <h3 style="margin:0;">Rotary Encoder <wbr>(KY-040)</wbr></h3>
+        <p class="pin-info">Pinos 25, 33 (Giro) e 32 (Click)</p>
+        <div class="value ky040-value" id="val_ky040">0</div>
+        <div class="value-btn" id="val_btn">Botão Liberado</div>
+    </div>
+
+    <h4 style="text-align: left; margin-bottom: 5px;">Logs de Conexão:</h4>
+    <div id="logs"></div>
+</div>
+
+<script>
+    let port, isConnected = false;
+    let pendingWrite = null;
+    const textDecoder = new TextDecoder();
+
+    const connectBtn = document.getElementById('connectBtn');
+    const valE6b2   = document.getElementById('val_e6b2');
+    const valKy040  = document.getElementById('val_ky040');
+    const valBtn    = document.getElementById('val_btn');
+    const valLim    = document.getElementById('val_lim');
+    const logsDiv   = document.getElementById('logs');
+
+    function log(msg) {
+        const d = document.createElement('div');
+        d.innerText = '> ' + msg;
+        logsDiv.appendChild(d);
+        logsDiv.scrollTop = logsDiv.scrollHeight;
+    }
+
+    connectBtn.addEventListener('click', async () => {
+        if (isConnected) { log('Já conectado.'); return; }
+        try {
+            port = await navigator.serial.requestPort();
+            await port.open({ baudRate: 115200 });
+            isConnected = true;
+            connectBtn.disabled = true;
+            connectBtn.innerText = 'Conectado à ESP32';
+            connectBtn.style.backgroundColor = '#28a745';
+            log('Conectado na porta Serial!');
+            readLoop();
+        } catch(e) {
+            log('Erro/Cancelado: ' + e);
+        }
+    });
+
+    async function readLoop() {
+        let buffer = '';
+        let btnTimeout;
+
+        while (isConnected) {
+            // Pega um reader, lê UM chunk, solta imediatamente
+            let value;
+            try {
+                const reader = port.readable.getReader();
+                let result;
+                try {
+                    result = await reader.read();
+                } finally {
+                    // SEMPRE solta o lock logo após o read, antes de qualquer outra coisa
+                    reader.releaseLock();
+                }
+
+                if (result.done) { isConnected = false; break; }
+                value = result.value;
+            } catch(e) {
+                log('Erro leitura: ' + e);
+                await new Promise(r => setTimeout(r, 200));
+                continue;
+            }
+
+            // ---- JANELA LIVRE: reader solto, writer disponível ----
+            if (pendingWrite) {
+                try {
+                    const writer = port.writable.getWriter();
+                    await writer.write(pendingWrite);
+                    writer.releaseLock();
+                    log('[TX] Byte 82 (R) enviado!');
+                } catch(e) {
+                    log('Erro escrita: ' + e);
+                }
+                pendingWrite = null;
+            }
+
+            // Processa os dados recebidos
+            if (value) {
+                buffer += textDecoder.decode(value);
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (let line of lines) {
+                    line = line.trim();
+                    if (!line) continue;
+                    try {
+                        const data = JSON.parse(line);
+                        if (data.msg !== undefined) log('[ESP32] ' + data.msg);
+                        if (data.dbg !== undefined) log('[ECHO] byte=' + data.val);
+                        if (data.e6b2  !== undefined) valE6b2.innerText  = data.e6b2;
+                        if (data.ky040 !== undefined) valKy040.innerText = data.ky040;
+                        if (data.btn === true) {
+                            valBtn.innerText = 'CLICADO!';
+                            valBtn.classList.add('active');
+                            clearTimeout(btnTimeout);
+                            btnTimeout = setTimeout(() => {
+                                valBtn.innerText = 'Botão Liberado';
+                                valBtn.classList.remove('active');
+                            }, 400);
+                        }
+                        if (data.lim_sw === true) {
+                            valLim.innerText = 'ZERO ALCANÇADO!';
+                            valLim.classList.add('lim-active');
+                            setTimeout(() => {
+                                valLim.innerText = 'Esperando fim de curso...';
+                                valLim.classList.remove('lim-active');
+                            }, 500);
+                        }
+                    } catch(e) { /* não é JSON */ }
+                }
+            }
+        }
+    }
+
+    function sendResetCommand() {
+        if (!isConnected) { log('Conecte na Serial primeiro!'); return; }
+        log("R agendado — será enviado no próximo ciclo de leitura...");
+        pendingWrite = new Uint8Array([82, 10]); // 'R' + '\n'
+    }
+
+    document.getElementById('resetBtn').addEventListener('click', sendResetCommand);
+    document.addEventListener('keydown', e => {
+        if (e.key.toLowerCase() === 'r') sendResetCommand();
+    });
+</script>
+
+</body>
+</html>
